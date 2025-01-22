@@ -45,6 +45,8 @@ aws glacier list-vaults --account-id $AWS_ACCOUNT_ID --region $AWS_REGION | jq -
 
 Then remove any vaults from `vaults.txt` you do not want to delete. 
 
+`vaults.txt` needs to contain one vault name per line, for example:
+
 ```
 myvault1
 myvault2_backup
