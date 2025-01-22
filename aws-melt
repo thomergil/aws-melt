@@ -1,8 +1,10 @@
 #!/usr/bin/env ruby
+
 require 'json'
 require 'time'
 require 'optparse'
 
+# Tool mostly written by claude.ai
 
 unless ENV['AWS_ACCOUNT_ID'] && ENV['AWS_REGION']
   puts "Please set environment variables:"
