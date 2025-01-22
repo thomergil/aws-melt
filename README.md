@@ -23,7 +23,10 @@ A tool for cleaning up AWS Glacier vaults by retrieving inventories and deleting
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/aws-melt.git
+git clone https://github.com/thomergil/aws-melt
+# brew install jq
+# or
+# apt-get install jq
 cd aws-melt
 chmod +x aws-melt
 ```
