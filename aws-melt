@@ -1,0 +1,169 @@
+#!/usr/bin/env ruby
+require 'json'
+require 'time'
+require 'optparse'
+
+
+unless ENV['AWS_ACCOUNT_ID'] && ENV['AWS_REGION']
+  puts "Please set environment variables:"
+  puts "AWS_ACCOUNT_ID"
+  puts "AWS_REGION"
+  exit 1
+end
+
+ACCOUNT_ID = ENV['AWS_ACCOUNT_ID']
+REGION = ENV['AWS_REGION']
+
+# Parse command line options
+options = {}
+OptionParser.new do |opts|
+  opts.banner = "Usage: glacier_cleanup.rb [options]"
+  opts.on("--delete-only", "Skip inventory retrieval and only process existing JSON files") do |v|
+    options[:delete_only] = v
+  end
+end.parse!
+
+def run_command(cmd)
+  puts "Running: #{cmd}"
+  output = `#{cmd}`
+  [output, $?.success?]
+end
+
+def initiate_inventory_job(vault)
+  cmd = "aws glacier initiate-job " \
+        "--account-id #{ACCOUNT_ID} " \
+        "--region #{REGION} " \
+        "--vault-name #{vault} " \
+        "--job-parameters '{\"Type\": \"inventory-retrieval\"}'"
+  
+  output, success = run_command(cmd)
+  if success
+    job_id = JSON.parse(output)["jobId"]
+    puts "Initiated job #{job_id} for vault #{vault}"
+    job_id
+  else
+    puts "Failed to initiate job for vault #{vault}"
+    nil
+  end
+end
+
+def check_job_status(vault, job_id)
+  cmd = "AWS_PAGER=\"\" aws glacier list-jobs " \
+        "--account-id #{ACCOUNT_ID} " \
+        "--region #{REGION} " \
+        "--vault-name #{vault}"
+  
+  output, success = run_command(cmd)
+  if success
+    jobs = JSON.parse(output)["JobList"]
+    job = jobs.find { |j| j["JobId"] == job_id }
+    job["Completed"] if job
+  else
+    puts "Failed to check job status for vault #{vault}"
+    false
+  end
+end
+
+def download_inventory(vault, job_id)
+  timestamp = Time.now.strftime("%Y%m%d%H%M%S")
+  output_file = "#{vault}_#{job_id}_#{timestamp}.json"
+  
+  cmd = "aws glacier get-job-output " \
+        "--account-id #{ACCOUNT_ID} " \
+        "--region #{REGION} " \
+        "--vault-name #{vault} " \
+        "--job-id #{job_id} " \
+        "#{output_file}"
+  
+  output, success = run_command(cmd)
+  if success
+    puts "Downloaded inventory to #{output_file}"
+    [output_file, vault]  # Return both the filename and original vault name
+  else
+    puts "Failed to download inventory for vault #{vault}"
+    nil
+  end
+end
+
+def delete_archives(inventory_file, vault_name)
+  begin
+    inventory = JSON.parse(File.read(inventory_file))
+    archive_ids = inventory["ArchiveList"].map { |a| a["ArchiveId"] }
+    
+    archive_ids.each do |archive_id|
+      puts "Deleting archive #{archive_id} from vault #{vault_name}"
+      cmd = "aws glacier delete-archive " \
+            "--account-id #{ACCOUNT_ID} " \
+            "--region #{REGION} " \
+            "--vault-name #{vault_name} " \
+            "--archive-id=\"#{archive_id}\""
+      
+      output, success = run_command(cmd)
+      unless success
+        puts "Failed to delete archive #{archive_id}"
+      end
+    end
+  rescue JSON::ParserError => e
+    puts "Failed to parse inventory file #{inventory_file}: #{e.message}"
+  rescue StandardError => e
+    puts "Error processing inventory file #{inventory_file}: #{e.message}"
+  end
+end
+
+# Main execution
+if options[:delete_only]
+  # Process existing JSON files
+  Dir.glob("*.json").each do |inventory_file|
+    puts "Processing existing inventory file: #{inventory_file}"
+    # Read the vault from vaults.txt
+    vaults = File.readlines('vaults.txt').map(&:strip)
+    vault_matches = vaults.select { |v| inventory_file.start_with?(v) }
+    
+    if vault_matches.empty?
+      puts "Warning: Could not find matching vault in vaults.txt for #{inventory_file}"
+      next
+    end
+    
+    # Use the longest matching vault name (in case some vault names are prefixes of others)
+    vault_name = vault_matches.max_by(&:length)
+    delete_archives(inventory_file, vault_name)
+  end
+else
+  # Original flow for inventory retrieval and deletion
+  jobs = {}
+
+  # Read vaults and initiate jobs
+  File.readlines('vaults.txt').each do |vault|
+    vault.strip!
+    if job_id = initiate_inventory_job(vault)
+      jobs[vault] = job_id
+    end
+  end
+
+  # Monitor jobs until completion
+  completed_jobs = {}
+  until jobs.empty?
+    jobs.each do |vault, job_id|
+      if check_job_status(vault, job_id)
+        puts "Job #{job_id} for vault #{vault} completed"
+        completed_jobs[vault] = job_id
+        jobs.delete(vault)
+      end
+    end
+    
+    unless jobs.empty?
+      puts "Waiting for jobs to complete: #{jobs.keys.join(', ')}"
+      sleep 3600  # Check every hour
+    end
+  end
+
+  # Download inventories and delete archives
+  completed_jobs.each do |vault, job_id|
+    if result = download_inventory(vault, job_id)
+      inventory_file, vault_name = result
+      delete_archives(inventory_file, vault_name)
+    end
+  end
+end
+
+puts "All operations completed"
