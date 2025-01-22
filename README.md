@@ -10,6 +10,7 @@ A tool for cleaning up AWS Glacier vaults by retrieving inventories and deleting
 2. Waiting for inventory jobs to complete
 3. Downloading inventory data
 4. Deleting all archives in the vaults
+5. Deleting the vaults themselves
 
 ## Prerequisites
 
@@ -18,7 +19,7 @@ A tool for cleaning up AWS Glacier vaults by retrieving inventories and deleting
 - AWS CLI configured with appropriate credentials
 - Environment variables:
   - `AWS_ACCOUNT_ID`
-  - `AWS_REGION`
+  - `AWS_DEFAULT_REGION`
 
 ## Installation
 
@@ -39,8 +40,8 @@ You can create `vaults.txt` using the AWS CLI:
 
 ```bash
 export AWS_ACCOUNT_ID="your-account-id"
-export AWS_REGION="your-region"
-aws glacier list-vaults --account-id $AWS_ACCOUNT_ID --region $AWS_REGION | jq -r '.VaultList[].VaultName'
+export AWS_DEFAULT_REGION="your-region"
+aws glacier list-vaults --account-id $AWS_ACCOUNT_ID --region $AWS_DEFAULT_REGION | jq -r '.VaultList[].VaultName'
 ```
 
 Then remove any vaults from `vaults.txt` you do not want to delete. 
@@ -59,17 +60,20 @@ another_vault
 
 ```bash
 export AWS_ACCOUNT_ID="your-account-id"
-export AWS_REGION="your-region"
+export AWS_DEFAULT_REGION="your-region"
 ./aws-melt
 ```
 
-### Resuming deletion
 
-If you have already retrieved the vault inventories (JSON files), you can skip the inventory retrieval process and just perform deletions:
-
+### Options
 ```bash
-./aws-melt --delete-only
+./aws-melt --delete-only  # Skip inventory retrieval, process existing JSON files
+./aws-melt --verbose      # Show detailed AWS command output
 ```
+
+The `--delete-only` option allows you to restart the deletion process using existing inventory JSON files if the process was interrupted.
+
+The `--verbose` option shows the output of AWS CLI commands, which can be helpful for debugging.
 
 ## How it works
 
@@ -81,13 +85,13 @@ If you have already retrieved the vault inventories (JSON files), you can skip t
    - Deletes all archives listed in the inventory
 3. Creates JSON files named: `{vaultname}_{jobid}_{timestamp}.json`
 
-The `--delete-only` option allows you to restart the deletion process using existing inventory JSON files if the process was interrupted.
-
 ## Notes
 
 - Glacier inventory retrieval typically takes 3-5 hours
 - Archive deletion is performed one archive at a time
 - Large vaults with many archives may take significant time to process
+- `aws-melt` will delete all archives and then the vaults themselves
+- Use `--verbose` if you need to see detailed command output for troubleshooting
 
 ## License
 

@@ -3,18 +3,20 @@
 require 'json'
 require 'time'
 require 'optparse'
+require 'set'
 
 # Tool mostly written by claude.ai
 
-unless ENV['AWS_ACCOUNT_ID'] && ENV['AWS_REGION']
+unless ENV['AWS_ACCOUNT_ID'] && ENV['AWS_DEFAULT_REGION']
   puts "Please set environment variables:"
   puts "AWS_ACCOUNT_ID"
-  puts "AWS_REGION"
+  puts "AWS_DEFAULT_REGION"
   exit 1
 end
 
 ACCOUNT_ID = ENV['AWS_ACCOUNT_ID']
-REGION = ENV['AWS_REGION']
+REGION = ENV['AWS_DEFAULT_REGION']
+VAULTS_FILE = 'vaults.txt'
 
 # Parse command line options
 options = {}
@@ -23,11 +25,18 @@ OptionParser.new do |opts|
   opts.on("--delete-only", "Skip inventory retrieval and only process existing JSON files") do |v|
     options[:delete_only] = v
   end
+  opts.on("--verbose", "Show command output") do |v|
+    options[:verbose] = v
+  end
 end.parse!
 
 def run_command(cmd)
   puts "Running: #{cmd}"
   output = `#{cmd}`
+  if options[:verbose] && !output.empty?
+    puts "Output:"
+    puts output
+  end
   [output, $?.success?]
 end
 
@@ -77,7 +86,7 @@ def download_inventory(vault, job_id)
         "--job-id #{job_id} " \
         "#{output_file}"
   
-  output, success = run_command(cmd)
+  _, success = run_command(cmd)
   if success
     puts "Downloaded inventory to #{output_file}"
     [output_file, vault]  # Return both the filename and original vault name
@@ -100,7 +109,7 @@ def delete_archives(inventory_file, vault_name)
             "--vault-name #{vault_name} " \
             "--archive-id=\"#{archive_id}\""
       
-      output, success = run_command(cmd)
+      _, success = run_command(cmd)
       unless success
         puts "Failed to delete archive #{archive_id}"
       end
@@ -112,30 +121,50 @@ def delete_archives(inventory_file, vault_name)
   end
 end
 
+def delete_vault(vault_name)
+  puts "Deleting vault: #{vault_name}"
+  cmd = "aws glacier delete-vault " \
+        "--account-id #{ACCOUNT_ID} " \
+        "--region #{REGION} " \
+        "--vault-name #{vault_name}"
+  
+  _, success = run_command(cmd)
+  unless success
+    puts "Failed to delete vault #{vault_name}"
+  end
+end
+
 # Main execution
 if options[:delete_only]
   # Process existing JSON files
+  processed_vaults = Set.new  # Track which vaults we've processed
   Dir.glob("*.json").each do |inventory_file|
     puts "Processing existing inventory file: #{inventory_file}"
-    # Read the vault from vaults.txt
-    vaults = File.readlines('vaults.txt').map(&:strip)
+    begin
+      vaults = File.readlines(VAULTS_FILE).map(&:strip)
+    rescue Errno::ENOENT
+      puts "Error: #{VAULTS_FILE} not found"
+      exit 1
+    end
     vault_matches = vaults.select { |v| inventory_file.start_with?(v) }
     
     if vault_matches.empty?
-      puts "Warning: Could not find matching vault in vaults.txt for #{inventory_file}"
+      puts "Warning: Could not find matching vault in #{VAULTS_FILE} for #{inventory_file}"
       next
     end
     
     # Use the longest matching vault name (in case some vault names are prefixes of others)
     vault_name = vault_matches.max_by(&:length)
     delete_archives(inventory_file, vault_name)
+    delete_vault(vault_name) unless processed_vaults.include?(vault_name)
+    processed_vaults.add(vault_name)
   end
 else
   # Original flow for inventory retrieval and deletion
   jobs = {}
 
   # Read vaults and initiate jobs
-  File.readlines('vaults.txt').each do |vault|
+  File.readlines(VAULTS_FILE).each do |vault|
     vault.strip!
     if job_id = initiate_inventory_job(vault)
       jobs[vault] = job_id
@@ -164,6 +193,7 @@ else
     if result = download_inventory(vault, job_id)
       inventory_file, vault_name = result
       delete_archives(inventory_file, vault_name)
+      delete_vault(vault_name)
     end
   end
 end
