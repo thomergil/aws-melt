@@ -189,13 +189,29 @@ else
     end
   end
 
-  # Download inventories and delete archives
+  # Download inventories
+  success = true
+  puts "Downloading all inventories..."
+  downloaded_inventories = []
   completed_jobs.each do |vault, job_id|
     if result = download_inventory(vault, job_id)
       inventory_file, vault_name = result
+      downloaded_inventories << [inventory_file, vault_name]
+    else
+      success = false
+      puts "Failed to download inventory for vault #{vault}"
+    end
+  end
+
+  # Delete archives and vaults
+  if success
+    puts "All inventories downloaded. Starting deletions..."
+    downloaded_inventories.each do |inventory_file, vault_name|
       delete_archives(inventory_file, vault_name)
       delete_vault(vault_name)
     end
+  else
+    puts "Some inventory downloads failed. Run with --delete-only after fixing the issue."
   end
 end
 
