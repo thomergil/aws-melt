@@ -18,22 +18,10 @@ ACCOUNT_ID = ENV['AWS_ACCOUNT_ID']
 REGION = ENV['AWS_DEFAULT_REGION']
 VAULTS_FILE = 'vaults.txt'
 
-# Parse command line options
-options = {}
-OptionParser.new do |opts|
-  opts.banner = "Usage: glacier_cleanup.rb [options]"
-  opts.on("--delete-only", "Skip inventory retrieval and only process existing JSON files") do |v|
-    options[:delete_only] = v
-  end
-  opts.on("--verbose", "Show command output") do |v|
-    options[:verbose] = v
-  end
-end.parse!
-
 def run_command(cmd)
   puts "Running: #{cmd}"
   output = `#{cmd}`
-  if options[:verbose] && !output.empty?
+  if $options[:verbose] && !output.empty?
     puts "Output:"
     puts output
   end
@@ -135,7 +123,20 @@ def delete_vault(vault_name)
 end
 
 # Main execution
-if options[:delete_only]
+
+# Parse command line options
+$options = {}
+OptionParser.new do |opts|
+  opts.banner = "Usage: glacier_cleanup.rb [options]"
+  opts.on("--delete-only", "Skip inventory retrieval and only process existing JSON files") do |v|
+    $options[:delete_only] = v
+  end
+  opts.on("--verbose", "Show command output") do |v|
+    $options[:verbose] = v
+  end
+end.parse!
+
+if $options[:delete_only]
   # Process existing JSON files
   processed_vaults = Set.new  # Track which vaults we've processed
   Dir.glob("*.json").each do |inventory_file|
