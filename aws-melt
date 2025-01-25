@@ -17,6 +17,7 @@ end
 ACCOUNT_ID = ENV['AWS_ACCOUNT_ID']
 REGION = ENV['AWS_DEFAULT_REGION']
 VAULTS_FILE = 'vaults.txt'
+MAX_PROCS = 32
 
 def run_command(cmd)
   puts "Running: #{cmd}"
@@ -34,7 +35,7 @@ def initiate_inventory_job(vault)
         "--region #{REGION} " \
         "--vault-name #{vault} " \
         "--job-parameters '{\"Type\": \"inventory-retrieval\"}'"
-  
+
   output, success = run_command(cmd)
   if success
     job_id = JSON.parse(output)["jobId"]
@@ -51,7 +52,7 @@ def check_job_status(vault, job_id)
         "--account-id #{ACCOUNT_ID} " \
         "--region #{REGION} " \
         "--vault-name #{vault}"
-  
+
   output, success = run_command(cmd)
   if success
     jobs = JSON.parse(output)["JobList"]
@@ -66,14 +67,14 @@ end
 def download_inventory(vault, job_id)
   timestamp = Time.now.strftime("%Y%m%d%H%M%S")
   output_file = "#{vault}_#{job_id}_#{timestamp}.json"
-  
+
   cmd = "aws glacier get-job-output " \
         "--account-id #{ACCOUNT_ID} " \
         "--region #{REGION} " \
         "--vault-name #{vault} " \
         "--job-id #{job_id} " \
         "#{output_file}"
-  
+
   _, success = run_command(cmd)
   if success
     puts "Downloaded inventory to #{output_file}"
@@ -88,20 +89,82 @@ def delete_archives(inventory_file, vault_name)
   begin
     inventory = JSON.parse(File.read(inventory_file))
     archive_ids = inventory["ArchiveList"].map { |a| a["ArchiveId"] }
-    
+    total = archive_ids.size
+    completed = 0
+    successes = 0
+    failures = 0
+    start_time = Time.now
+    processes = []
+
     archive_ids.each do |archive_id|
-      puts "Deleting archive #{archive_id} from vault #{vault_name}"
-      cmd = "aws glacier delete-archive " \
-            "--account-id #{ACCOUNT_ID} " \
-            "--region #{REGION} " \
-            "--vault-name #{vault_name} " \
-            "--archive-id=\"#{archive_id}\""
-      
-      _, success = run_command(cmd)
-      unless success
-        puts "Failed to delete archive #{archive_id}"
+      processes.reject! do |pid|
+        begin
+          Process.waitpid(pid, Process::WNOHANG)
+          if $?.success?
+            successes += 1
+          else
+            failures += 1
+          end
+          true
+        rescue
+          false
+        end
       end
+
+      completed = successes + failures
+      elapsed = Time.now - start_time
+      rate = elapsed > 0 ? completed / elapsed : 0
+      eta = rate > 0 ? ((total - completed) / rate) : 0
+      hours = (eta / 3600).floor
+      mins = ((eta % 3600) / 60).floor
+      secs = (eta % 60).round
+      eta_str = "#{hours}h#{mins}m#{secs}s"
+      puts "Progress: #{completed}/#{total} (#{(completed.to_f/total*100).round(1)}%) - #{successes} succeeded, #{failures} failed - ETA: #{eta_str}"
+
+      if processes.length >= MAX_PROCS
+        pid = Process.wait
+        if $?.success?
+          successes += 1
+        else
+          failures += 1
+        end
+        completed = successes + failures
+        elapsed = Time.now - start_time
+        rate = completed / elapsed
+        eta = ((total - completed) / rate).round
+        puts "Progress: #{completed}/#{total} (#{(completed.to_f/total*100).round(1)}%) - #{successes} succeeded, #{failures} failed - ETA: #{eta}s"
+        next
+      end
+
+      pid = fork do
+        puts "Deleting archive #{archive_id} from vault #{vault_name} (PID: #{Process.pid})"
+        cmd = "aws glacier delete-archive " \
+          "--account-id #{ACCOUNT_ID} " \
+          "--region #{REGION} " \
+          "--vault-name #{vault_name} " \
+          "--archive-id=\"#{archive_id}\""
+        puts "Running: #{cmd}"
+        system(cmd)
+        exit($?.success? ? 0 : 1)
+      end
+
+      processes << pid
     end
+
+    processes.each do |pid|
+      Process.waitpid(pid)
+      if $?.success?
+        successes += 1
+      else
+        failures += 1
+      end
+      completed = successes + failures
+      elapsed = Time.now - start_time
+      rate = completed / elapsed
+      eta = ((total - completed) / rate).round
+      puts "Progress: #{completed}/#{total} (#{(completed.to_f/total*100).round(1)}%) - #{successes} succeeded, #{failures} failed - ETA: #{eta}s"
+    end
+
   rescue JSON::ParserError => e
     puts "Failed to parse inventory file #{inventory_file}: #{e.message}"
   rescue StandardError => e
@@ -115,7 +178,7 @@ def delete_vault(vault_name)
         "--account-id #{ACCOUNT_ID} " \
         "--region #{REGION} " \
         "--vault-name #{vault_name}"
-  
+
   _, success = run_command(cmd)
   unless success
     puts "Failed to delete vault #{vault_name}"
@@ -136,83 +199,92 @@ OptionParser.new do |opts|
   end
 end.parse!
 
-if $options[:delete_only]
-  # Process existing JSON files
-  processed_vaults = Set.new  # Track which vaults we've processed
-  Dir.glob("*.json").each do |inventory_file|
-    puts "Processing existing inventory file: #{inventory_file}"
-    begin
-      vaults = File.readlines(VAULTS_FILE).map(&:strip)
-    rescue Errno::ENOENT
-      puts "Error: #{VAULTS_FILE} not found"
-      exit 1
-    end
-    vault_matches = vaults.select { |v| inventory_file.start_with?(v) }
-    
-    if vault_matches.empty?
-      puts "Warning: Could not find matching vault in #{VAULTS_FILE} for #{inventory_file}"
-      next
-    end
-    
-    # Use the longest matching vault name (in case some vault names are prefixes of others)
-    vault_name = vault_matches.max_by(&:length)
-    delete_archives(inventory_file, vault_name)
-    delete_vault(vault_name) unless processed_vaults.include?(vault_name)
-    processed_vaults.add(vault_name)
-  end
-else
-  # Original flow for inventory retrieval and deletion
-  jobs = {}
-
-  # Read vaults and initiate jobs
-  File.readlines(VAULTS_FILE).each do |vault|
-    vault.strip!
-    if job_id = initiate_inventory_job(vault)
-      jobs[vault] = job_id
-    end
-  end
-
-  # Monitor jobs until completion
-  completed_jobs = {}
-  until jobs.empty?
-    jobs.each do |vault, job_id|
-      if check_job_status(vault, job_id)
-        puts "Job #{job_id} for vault #{vault} completed"
-        completed_jobs[vault] = job_id
-        jobs.delete(vault)
+def main
+  if $options[:delete_only]
+    # Process existing JSON files
+    processed_vaults = Set.new  # Track which vaults we've processed
+    Dir.glob("*.json").each do |inventory_file|
+      puts "Processing existing inventory file: #{inventory_file}"
+      begin
+        vaults = File.readlines(VAULTS_FILE).map(&:strip)
+      rescue Errno::ENOENT
+        puts "Error: #{VAULTS_FILE} not found"
+        exit 1
       end
-    end
-    
-    unless jobs.empty?
-      puts "Waiting for jobs to complete: #{jobs.keys.join(', ')}"
-      sleep 3600  # Check every hour
-    end
-  end
+      vault_matches = vaults.select { |v| inventory_file.start_with?(v) }
 
-  # Download inventories
-  success = true
-  puts "Downloading all inventories..."
-  downloaded_inventories = []
-  completed_jobs.each do |vault, job_id|
-    if result = download_inventory(vault, job_id)
-      inventory_file, vault_name = result
-      downloaded_inventories << [inventory_file, vault_name]
-    else
-      success = false
-      puts "Failed to download inventory for vault #{vault}"
-    end
-  end
+      if vault_matches.empty?
+        puts "Warning: Could not find matching vault in #{VAULTS_FILE} for #{inventory_file}"
+        next
+      end
 
-  # Delete archives and vaults
-  if success
-    puts "All inventories downloaded. Starting deletions..."
-    downloaded_inventories.each do |inventory_file, vault_name|
+      # Use the longest matching vault name (in case some vault names are prefixes of others)
+      vault_name = vault_matches.max_by(&:length)
       delete_archives(inventory_file, vault_name)
-      delete_vault(vault_name)
+      delete_vault(vault_name) unless processed_vaults.include?(vault_name)
+      processed_vaults.add(vault_name)
     end
   else
-    puts "Some inventory downloads failed. Run with --delete-only after fixing the issue."
+    # Original flow for inventory retrieval and deletion
+    jobs = {}
+
+    # Read vaults and initiate jobs
+    File.readlines(VAULTS_FILE).each do |vault|
+      vault.strip!
+      if job_id = initiate_inventory_job(vault)
+        jobs[vault] = job_id
+      end
+    end
+
+    # Monitor jobs until completion
+    completed_jobs = {}
+    until jobs.empty?
+      jobs.each do |vault, job_id|
+        status = check_job_status(vault, job_id)
+        if status && status[:completed]
+          if status[:succeeded]  # Add status check
+            puts "Job #{job_id} for vault #{vault} completed successfully"
+            completed_jobs[vault] = job_id
+          else
+            puts "Job #{job_id} for vault #{vault} failed: #{status[:status_message]}"
+          end
+          jobs.delete(vault)
+        end
+      end
+
+      unless jobs.empty?
+        puts "Waiting for jobs to complete: #{jobs.keys.join(', ')}"
+        sleep 3600
+      end
+    end
+
+    # Download inventories
+    success = true
+    puts "Downloading all inventories..."
+    downloaded_inventories = []
+    completed_jobs.each do |vault, job_id|
+      if result = download_inventory(vault, job_id)
+        inventory_file, vault_name = result
+        downloaded_inventories << [inventory_file, vault_name]
+      else
+        success = false
+        puts "Failed to download inventory for vault #{vault}"
+      end
+    end
+
+    # Delete archives and vaults
+    if success
+      puts "All inventories downloaded. Starting deletions..."
+      downloaded_inventories.each do |inventory_file, vault_name|
+        delete_archives(inventory_file, vault_name)
+        delete_vault(vault_name)
+      end
+    else
+      puts "Some inventory downloads failed. Run with --delete-only after fixing the issue."
+    end
   end
+
+  puts "All operations completed"
 end
 
-puts "All operations completed"
+main
