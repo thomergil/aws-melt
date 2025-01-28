@@ -10,7 +10,8 @@ A tool for cleaning up AWS Glacier vaults by retrieving inventories and deleting
 2. Waiting for inventory jobs to complete
 3. Downloading inventory data
 4. Deleting all archives in the vaults
-5. Deleting the vaults themselves
+
+**Note that `aws-melt` does not delete the vaults themselves, only the archives within it. The vaults need to be deleted by hand. (The reason is that AWS does not allow any activity to the vault within a few hours of touching it.)**
 
 ## Prerequisites
 

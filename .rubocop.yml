@@ -1,0 +1,14 @@
+Metrics/MethodLength:
+    Max: 20
+
+Style/NegatedIf:
+    Enabled: false
+
+Style/IfUnlessModifier:
+    Enabled: false
+
+Style/Next:
+    Enabled: false
+
+Lint/UselessAssignment:
+  AutoCorrect: false
